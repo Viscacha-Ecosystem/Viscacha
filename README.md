@@ -1,180 +1,147 @@
 # Viscacha
 
-Dead simple background jobs for Python. Built for AI pipelines — every job is crash-safe, traceable, and retriable.
+Run Python functions as background jobs — no Redis, no Celery, no broker of any kind. State lives in a local file. Jobs survive crashes.
+
+```bash
+pip install viscacha
+```
+
+---
+
+## The problem it solves
+
+You have a function that's slow, might fail, or needs to run outside your main process. You want to retry it automatically if it fails, and you don't want to lose it if your process dies.
+
+The standard answer is Celery. Celery requires Redis or RabbitMQ, a separate worker process, and about an hour of setup before you write a single line of your actual code.
+
+Viscacha is the other answer.
+
+---
+
+## Quickstart
 
 ```python
 from viscacha import Client, Worker
 
-client = Client()
+client = Client()          # jobs live in memory
 worker = Worker(client)
 
-@worker.job("greet")
-def greet(name: str) -> dict:
-    return {"message": f"Hello, {name}!"}
+@worker.job("process", max_retries=3)
+def process(file: str) -> dict:
+    # do something slow or fallible
+    return {"lines": count_lines(file)}
 
 worker.run(blocking=False)
 
-handle = client.enqueue("greet", name="Alice")
-result = handle.wait()
-print(result.result)  # {'message': 'Hello, Alice!'}
+handle = client.enqueue("process", file="data.csv")
+result = handle.wait(timeout=60)
+print(result.result)   # {"lines": 4821}
+print(result.status)   # "done"
 ```
 
-No broker. No Redis. No Docker. Just Python.
+That's it. No config files, no server to start, no dependencies to install.
 
 ---
 
-## Install
-
-```bash
-pip install uv
-uv pip install -e .
-```
-
-Requires Python 3.10+.
-
----
-
-## How it works
-
-1. Submit a job
-2. A worker function runs it
-3. Get the result or inspect what happened
+## Jobs survive crashes
 
 ```python
-handle = client.enqueue("send_email", to="alice@example.com")
+# Add a file path to persist jobs across restarts
+client = Client(log_path="jobs.db")
+```
 
-result = handle.wait(timeout=30)  # raises TimeoutError if it doesn't finish
-print(result.status)   # 'done' | 'failed' | 'cancelled'
-print(result.result)   # return value of the job function
-print(result.error)    # set if failed, else None
+If your process crashes mid-job, the job goes back to the queue when you restart. Nothing is lost.
 
-handle.cancel()        # cancel a pending job
+---
 
-client.jobs()               # list all jobs
+## Retries
+
+```python
+@worker.job("call_api", max_retries=5, lease_ttl=60.0)
+def call_api(endpoint: str) -> dict:
+    resp = requests.get(endpoint, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+```
+
+Any exception triggers a retry. After `max_retries` failures the job is marked permanently failed and you can inspect what went wrong. `lease_ttl` is how long a worker can hold a job before it's considered stalled and returned to the queue.
+
+---
+
+## Checking job status
+
+```python
+handle = client.enqueue("call_api", endpoint="https://api.example.com/data")
+
+result = handle.wait(timeout=30)   # block until done, raises TimeoutError
+result.status    # "done" | "failed" | "cancelled"
+result.result    # return value of the function
+result.error     # exception message if failed
+
+handle.cancel()  # cancel while still pending
+
+client.jobs()               # all jobs
 client.jobs(status="done")  # filter by status
 client.get(handle.id)       # get one by ID
 ```
 
 ---
 
-## Guarantees
-
-- **No lost jobs** — a job stays in the queue until a worker completes it
-- **Safe retries** — transient failures retry automatically
-- **Full traceability** — every job logged with type, args, result, retries, error
-- **Crash-safe** — if a worker dies mid-job, the lease expires and the job returns to the queue
-
----
-
 ## AI pipelines
 
-Each Claude call is a job. Workers run in parallel. Failures retry automatically.
+Long-running LLM calls are a natural fit. Each call is a job — retries handle rate limits and transient errors, and you can run workers in parallel.
 
 ```python
 import anthropic
 from viscacha import Client, Worker
 
-client = Client()
+client = Client(log_path="jobs.db")
 worker = Worker(client)
 ai = anthropic.Anthropic()
 
-@worker.job("classify_ticket", max_retries=2)
-def classify_ticket(title: str, body: str) -> dict:
-    response = ai.messages.create(
+@worker.job("classify", max_retries=3)
+def classify(title: str, body: str) -> dict:
+    msg = ai.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=120,
-        messages=[{"role": "user", "content": f"Classify: {title}\n{body}"}],
+        max_tokens=100,
+        messages=[{"role": "user", "content": f"Classify this ticket: {title}\n{body}"}],
     )
-    return {"category": "bug", "priority": "high"}
+    return {"category": msg.content[0].text}
 
 worker.run(blocking=False)
 
-handles = [client.enqueue("classify_ticket", title=t, body=b) for t, b in tickets]
-results = [h.wait(timeout=30) for h in handles]
+handles = [client.enqueue("classify", title=t, body=b) for t, b in tickets]
+results = [h.wait(timeout=60) for h in handles]
 ```
+
+---
+
+## Scale to multiple machines
+
+When you outgrow a single process, swap in the [Rust server](https://github.com/Viscacha-Ecosystem/Viscacha-rs) as a drop-in backend. One line change:
+
+```python
+# Before: in-process
+client = Client(log_path="jobs.db")
+
+# After: workers can run on any machine
+client = Client(url="http://your-server:8000")
+```
+
+The Rust server adds a time-travel debugger UI, Prometheus metrics, Grafana dashboards, and a full HTTP API. Workers on separate machines, persistence across restarts, all the same Python code.
+
+---
+
+## Install
 
 ```bash
-ANTHROPIC_API_KEY=sk-... python demos/demo_ai_jobs.py
+pip install viscacha
+
+# For the HTTP client (remote mode):
+pip install viscacha requests
+
+# For the terminal dashboard:
+pip install viscacha rich
 ```
 
----
-
-## Any function works
-
-Email, HTTP calls, reports, transforms — a worker is just a function.
-
-```python
-@worker.job("send_email")
-def send_email(to: str, subject: str, html: str) -> dict:
-    return {"to": to, "sent": True}
-
-client.enqueue("send_email", to="bob@example.com", subject="Order confirmed", html="...")
-```
-
-```bash
-python demos/demo_email_jobs.py  # dry-run, no SMTP needed
-```
-
----
-
-## Retries and crash recovery
-
-```python
-@worker.job("call_api", max_retries=5, lease_ttl=60.0)
-def call_api(endpoint: str) -> dict:
-    response = requests.get(endpoint, timeout=10)
-    response.raise_for_status()
-    return response.json()
-```
-
-`max_retries` — retries on any exception (default 3)  
-`lease_ttl` — seconds before a stalled job is reclaimed (default 30)
-
----
-
-## Persistence
-
-```python
-client = Client(log_path="jobs.jsonl")
-```
-
-Append-only log. Jobs survive restarts.
-
----
-
-## HTTP API
-
-Expose jobs over HTTP so workers can run anywhere:
-
-```python
-from viscacha import Client
-from viscacha.server import create_app
-import uvicorn
-
-app = create_app(Client(log_path="jobs.jsonl"))
-uvicorn.run(app, host="0.0.0.0", port=8000)
-```
-
-```bash
-curl -X POST http:/localhost:8000/jobs \
-  -H "Content-Type: application/json" \
-  -d '{"job_type": "greet", "args": {"name": "Alice"}}'
-
-curl http://localhost:8000/jobs?status=done
-```
-[](url)
----
-
-## Under the hood
-
-Jobs are tuples in an append-only tuple space. Workers claim jobs via leases — if a worker crashes, the lease expires and the job returns to the queue automatically. The coordination layer handles ordering, crash safety, and observability. Viscacha is a thin API on top.
-
----
-
-## Roadmap
-
-- [ ] Priority queues
-- [ ] Job chaining / workflows
-- [ ] Web dashboard
-- [ ] Scheduled / cron jobs
-- [ ] Distributed workers (multi-process, multi-host)
+Python 3.10+
