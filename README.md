@@ -1,6 +1,6 @@
 # Viscacha
 
-Background jobs for Python. Built for AI pipelines — every job crash-safe, traceable, and retriable.
+Dead simple background jobs for Python. Built for AI pipelines — every job is crash-safe, traceable, and retriable.
 
 ```python
 from viscacha import Client, Worker
