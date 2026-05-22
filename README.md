@@ -132,16 +132,8 @@ The Rust server adds a time-travel debugger UI, Prometheus metrics, Grafana dash
 
 ---
 
-## Install
-
-```bash
-pip install viscacha
-
-# For the HTTP client (remote mode):
-pip install viscacha requests
-
-# For the terminal dashboard:
-pip install viscacha rich
+## Tests
+pytest tests/
 ```
 
 Python 3.10+
