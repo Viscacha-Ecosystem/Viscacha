@@ -156,13 +156,13 @@ uvicorn.run(app, host="0.0.0.0", port=8000)
 ```
 
 ```bash
-curl -X POST http://localhost:8000/jobs \
+curl -X POST http:/localhost:8000/jobs \
   -H "Content-Type: application/json" \
   -d '{"job_type": "greet", "args": {"name": "Alice"}}'
 
 curl http://localhost:8000/jobs?status=done
 ```
-
+[](url)
 ---
 
 ## Under the hood
